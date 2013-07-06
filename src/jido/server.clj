@@ -79,7 +79,7 @@
 
 (defn get-links [tweeter]
   "Get and process/unshorten list of links from tweets JSON"
-  (def raw-links (vec (map :expanded_url (map first (map :urls (map :entities (get-tweets tweeter)))))))
+  (def raw-links (vec (map (comp :expanded_url first :urls :entities) (get-tweets tweeter))))
   (vec (for [raw-link raw-links] (when raw-link (check-url raw-link)))))
 
 (defn list-links [tweeter]
