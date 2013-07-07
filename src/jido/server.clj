@@ -10,7 +10,7 @@
         [twitter.api.restful]
         ;; for view
         [hiccup.core :only [html]]
-        [hiccup.form :only (form-to label text-area submit-button)]
+        [hiccup.form :only (form-to label text-area select-options drop-down submit-button)]
         [hiccup.page :only [html5 include-css include-js]])
   (:require [org.httpkit.server :as server]
             [clojure.tools.nrepl.server :as nrepl]
@@ -35,8 +35,14 @@
 (defmacro with-car [& body] `(car/with-conn redis-pool redis-server-spec ~@body))
 
 ;; templates
-(defn index [& [flash links]]
-  (let [authors (with-car (car/smembers "circle"))]
+(defn get-links-from-redis []
+  (let [id (with-car (car/get "jido-id"))]
+    (vec (for [i (range 1 (inc (read-string id)))]
+      (with-car (car/get (str "temp-link:" i)))))))
+
+(defn index [& flash]
+  (let [authors (with-car (car/smembers "circle"))
+        links (get-links-from-redis)]
   (html
     [:head
      [:title "Jido"]
@@ -44,7 +50,7 @@
                   "/css/styles.css")]
     [:body
      [:div.container
-      [:h1 "Jido"]
+      [:h1 "Jido 自動"]
       [:p "Intelligent Twitter Auto Posting Tool"
        [:small " (which does nothing as of now...)"]]
       [:hr]
@@ -65,7 +71,13 @@
          (for [author authors]
            [:span (str "<a target='_blank' href='http://twitter.com/" author "'>@" author "</a>  ")])]
          (form-to [:post "/reset"]
-          (submit-button {:class "btn"} "Reset"))]]
+          (submit-button {:class "btn"} "Reset"))]
+        [:div.span3
+          [:h4 "List Links"]
+          (form-to [:post "/list-links"]
+            (drop-down "author" authors)
+            [:br]
+            (submit-button {:class "btn"} "Go!"))]]
       [:hr]
       [:ul (for [link links] (when link [:li (str "<a href='" link "'>" link "</a>")]))]]
      (include-js "//ajax.googleapis.com/ajax/libs/jquery/1.7.2/jquery.min.js")
@@ -98,16 +110,33 @@
              :oauth-creds my-creds
              :params {:screen-name author})))
 
-(defn get-links [author]
+(defn process-links [author]
   "Get and process/unshorten list of links from tweets JSON"
   (def raw-links (vec (map (comp :expanded_url first :urls :entities) (get-tweets author))))
-  (vec (for [raw-link raw-links] (when raw-link (check-url raw-link)))))
+  (vec (for [raw-link raw-links] (if raw-link (check-url raw-link)))))
+
+(defn add-links-to-redis [links author]
+  "Add links to redis DB"
+  (doseq [link links] 
+    (when link
+      (def last-id (with-car (car/get "jido-id")))
+      (doseq [i (range 1 (inc (read-string last-id)))]        
+        (def jido-link (with-car (car/get (str "temp-link:" i))))
+        (if (= jido-link link) 
+          (do 
+            (def duplicate? true)
+            (with-car (car/sadd (str "temp-author:" i) author)))))
+      (if-not duplicate?
+        (do
+          (def current-id (with-car (car/incr "jido-id")))
+          (with-car (car/set (str "temp-link:" current-id) link)
+                    (car/sadd (str "temp-author:" current-id) author))))
+      (def duplicate? false))))
 
 (defn list-links [author]
   "Put list of links of a author into HTML template"
-  (when-not (str/blank? author)
-   (def links (get-links [author])))
-  (index "" links))
+  (add-links-to-redis (process-links author) author)
+  (index (str "Processed list of links from @" author ".")))
 
 (defn add-author [author]
   "Add author to Circle"
@@ -124,6 +153,7 @@
   (GET "/" [] (index))
   (POST "/" [author] (add-author author))
   (POST "/reset" [] (reset))
+  (POST "/list-links" [author] (list-links author))
   (route/resources "/")
   (route/not-found "Not Found"))
 
