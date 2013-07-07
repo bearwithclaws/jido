@@ -20,7 +20,8 @@
             [ring.middleware.reload :as reload]
             [ring.util.response :as ring]
             [compojure.handler :as handler]
-            [compojure.route :as route])
+            [compojure.route :as route]
+            [taoensso.carmine :as car])
   (:import
    (twitter.callbacks.protocols SyncSingleCallback)))
 
@@ -28,8 +29,14 @@
 (defonce prod? (atom (System/getenv "LEIN_NO_DEV")))
 (defonce counter (atom 0))
 
+;; A Redis connection with Carmine
+(defonce redis-pool (car/make-conn-pool))
+(def redis-server-spec (car/make-conn-spec))
+(defmacro with-car [& body] `(car/with-conn redis-pool redis-server-spec ~@body))
+
 ;; templates
-(defn index [& [links]]
+(defn index [& [flash links]]
+  (let [authors (with-car (car/smembers "circle"))]
   (html
     [:head
      [:title "Jido"]
@@ -38,18 +45,32 @@
     [:body
      [:div.container
       [:h1 "Jido"]
-      [:h4 "Intelligent Twitter Link Auto-Posting Tool"]
-      (form-to [:post "/"]
-        (label "tweeter" "Enter Twitter username")
-        (text-area "tweeter")
-        [:br]
-        (submit-button {:class "btn"} "Get Links!"))
-      
+      [:p "Intelligent Twitter Auto Posting Tool"
+       [:small " (which does nothing as of now...)"]]
+      [:hr]
+      (when flash
+            [:div.alert.alert-info
+              [:button{:type "button" :class "close" :data-dismiss "alert"} "&times;"] flash])
+      [:div.row
+        [:div.span3
+          [:h4 "Add Author"]
+          (form-to [:post "/"]
+            (label "author" "Enter Twitter username")
+            (text-area "author")
+            [:br]
+            (submit-button {:class "btn"} "Add to Circle"))]
+        [:div.span3
+         [:h4 "Circle of Authors"]
+         [:p
+         (for [author authors]
+           [:span (str "<a target='_blank' href='http://twitter.com/" author "'>@" author "</a>  ")])]
+         (form-to [:post "/reset"]
+          (submit-button {:class "btn"} "Reset"))]]
       [:hr]
       [:ul (for [link links] (when link [:li (str "<a href='" link "'>" link "</a>")]))]]
      (include-js "//ajax.googleapis.com/ajax/libs/jquery/1.7.2/jquery.min.js")
      (include-js "//netdna.bootstrapcdn.com/twitter-bootstrap/2.3.1/js/bootstrap.min.js")
-     ]))
+     ])))
 
 ;; handler
 (def my-creds (make-oauth-creds (System/getenv "TWITTER_APP_SECRET")
@@ -71,27 +92,38 @@
   "If the URL has been shortened, unshorten it"
   (if (is-url-shortener? initial-url) (final-url initial-url) initial-url))
 
-(defn get-tweets [tweeter]
-  "Get tweets JSON from tweeter"
+(defn get-tweets [author]
+  "Get tweets JSON from author"
   (:body (statuses-user-timeline
              :oauth-creds my-creds
-             :params {:screen-name tweeter})))
+             :params {:screen-name author})))
 
-(defn get-links [tweeter]
+(defn get-links [author]
   "Get and process/unshorten list of links from tweets JSON"
-  (def raw-links (vec (map (comp :expanded_url first :urls :entities) (get-tweets tweeter))))
+  (def raw-links (vec (map (comp :expanded_url first :urls :entities) (get-tweets author))))
   (vec (for [raw-link raw-links] (when raw-link (check-url raw-link)))))
 
-(defn list-links [tweeter]
-  "Put list of links of a tweeter into HTML template"
-  (when-not (str/blank? tweeter)
-   (def links (get-links [tweeter])))
-  (index links))
+(defn list-links [author]
+  "Put list of links of a author into HTML template"
+  (when-not (str/blank? author)
+   (def links (get-links [author])))
+  (index "" links))
+
+(defn add-author [author]
+  "Add author to Circle"
+  (with-car (car/sadd "circle" author))
+  (index (str "Added " author " to Circle.")))
+
+(defn reset []
+  "Remove all authors from Circle"
+  (with-car (car/del "circle"))
+  (index (str "Removed all author from Circle.")))
 
 ; routes
 (defroutes app-routes
   (GET "/" [] (index))
-  (POST "/" [tweeter] (list-links tweeter))
+  (POST "/" [author] (add-author author))
+  (POST "/reset" [] (reset))
   (route/resources "/")
   (route/not-found "Not Found"))
 
